@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+*.iml
+.vscode
+.settings
+.project
+.classpath
+
+# Build artifacts
+build/
+.gradle/
+out/
+*.jar
+*.class
+
+# Logs
+*.log
+
+# Generated index files
+*.json
+embeddings_index.json
+
+# Documentation (not needed in image)
+README.md
+QUICKSTART.md
+INSTALL.md
+DOCKER.md
+
+# Scripts
+run.sh
+gradlew
+gradlew.bat
+gradle/
+
+# macOS
+.DS_Store
+
+# Keep only necessary files for build
+!build.gradle.kts
+!settings.gradle.kts
+!src/

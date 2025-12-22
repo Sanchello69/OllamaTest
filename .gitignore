@@ -1,0 +1,43 @@
+# Gradle
+.gradle/
+build/
+!gradle-wrapper.jar
+gradle.properties
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Generated files
+*.jar
+!gradle-wrapper.jar
+*.class
+
+# Local configuration
+local.properties
+
+# Index files
+*.json
+embeddings_index.json
+
+# Large test data files
+*.rtf
+!example.rtf
+
+# Logs
+*.log

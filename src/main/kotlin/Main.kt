@@ -22,10 +22,10 @@ fun main(args: Array<String>) = runBlocking {
 
             val rtfFilePath = args[1]
             val indexPath = if (args.size > 2) args[2] else "embeddings_index.json"
-            val chunkSize = if (args.size > 3) args[3].toIntOrNull() ?: 500 else 500
-            val overlap = if (args.size > 4) args[4].toIntOrNull() ?: 50 else 50
+            val maxChunkSize = if (args.size > 3) args[3].toIntOrNull() ?: 2000 else 2000
+            val minChunkSize = if (args.size > 4) args[4].toIntOrNull() ?: 50 else 50
 
-            indexRtfFile(rtfFilePath, indexPath, chunkSize, overlap)
+            indexRtfFile(rtfFilePath, indexPath, maxChunkSize, minChunkSize)
         }
 
         "search" -> {
@@ -53,6 +53,20 @@ fun main(args: Array<String>) = runBlocking {
             showStats(indexPath)
         }
 
+        "ask" -> {
+            if (args.size < 2) {
+                println("Error: Please provide question")
+                println("Usage: ask <question> [index-path] [--no-rag]")
+                return@runBlocking
+            }
+
+            val question = args[1]
+            val useRag = !args.contains("--no-rag")
+            val indexPath = if (args.size > 2 && !args[2].startsWith("--")) args[2] else "embeddings_index.json"
+
+            askQuestion(question, indexPath, useRag)
+        }
+
         else -> {
             println("Unknown command: $command")
             printUsage()
@@ -60,11 +74,12 @@ fun main(args: Array<String>) = runBlocking {
     }
 }
 
-suspend fun indexRtfFile(rtfFilePath: String, indexPath: String, chunkSize: Int, overlap: Int) {
+suspend fun indexRtfFile(rtfFilePath: String, indexPath: String, maxChunkSize: Int, minChunkSize: Int) {
     println("📄 Processing RTF file: $rtfFilePath")
     println("Settings:")
-    println("  - Chunk size: $chunkSize characters")
-    println("  - Overlap: $overlap characters")
+    println("  - Chunking mode: По абзацам")
+    println("  - Max chunk size: $maxChunkSize characters")
+    println("  - Min chunk size: $minChunkSize characters")
     println("  - Index output: $indexPath\n")
 
     // Step 1: Parse RTF file
@@ -79,8 +94,8 @@ suspend fun indexRtfFile(rtfFilePath: String, indexPath: String, chunkSize: Int,
     println("✓ Extracted ${text.length} characters\n")
 
     // Step 2: Split into chunks
-    println("Step 2: Splitting text into chunks...")
-    val chunker = TextChunker(chunkSize, overlap)
+    println("Step 2: Splitting text into chunks by paragraphs...")
+    val chunker = TextChunker(maxChunkSize, minChunkSize)
     val chunks = chunker.chunkText(text)
     println("✓ Created ${chunks.size} chunks\n")
 
@@ -198,22 +213,110 @@ fun showStats(indexPath: String) {
     }
 }
 
+suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean) {
+    println("🤖 AI Assistant ${if (useRag) "with RAG" else "without RAG"}\n")
+    println("Question: \"$question\"\n")
+
+    val openRouterClient = OpenRouterClient()
+
+    try {
+        if (useRag) {
+            // RAG режим: поиск контекста + ответ
+            println("Step 1: Loading index and searching for relevant context...")
+
+            val index = VectorIndex()
+            try {
+                index.load(indexPath)
+                println("✓ Index loaded (${index.size()} entries)\n")
+            } catch (e: Exception) {
+                println("❌ Error loading index: ${e.message}")
+                println("Falling back to non-RAG mode...\n")
+                val answer = openRouterClient.askQuestion(question)
+                println("💬 Answer:\n$answer\n")
+                return
+            }
+
+            // Генерируем эмбеддинг для вопроса
+            println("Step 2: Generating question embedding...")
+            val ollamaClient = OllamaClient()
+            val queryEmbedding = try {
+                ollamaClient.generateEmbedding(question)
+            } catch (e: Exception) {
+                println("❌ Error generating query embedding: ${e.message}")
+                ollamaClient.close()
+                println("Falling back to non-RAG mode...\n")
+                val answer = openRouterClient.askQuestion(question)
+                println("💬 Answer:\n$answer\n")
+                return
+            } finally {
+                ollamaClient.close()
+            }
+            println("✓ Embedding generated\n")
+
+            // Ищем релевантные чанки
+            println("Step 3: Searching for relevant chunks...")
+            val results = index.search(queryEmbedding, 5)
+
+            if (results.isEmpty()) {
+                println("⚠️  No relevant chunks found")
+                println("Falling back to non-RAG mode...\n")
+                val answer = openRouterClient.askQuestion(question)
+                println("💬 Answer:\n$answer\n")
+                return
+            }
+
+            println("✓ Found ${results.size} relevant chunks\n")
+
+            // Отображаем найденные чанки
+            println("📚 Relevant chunks:")
+            results.forEachIndexed { idx, result ->
+                println("  ${idx + 1}. [Score: ${"%.4f".format(result.score)}] ${result.text.take(100)}...")
+            }
+            println()
+
+            // Объединяем чанки в контекст
+            val context = results.joinToString("\n\n---\n\n") { it.text }
+
+            // Отправляем вопрос с контекстом в LLM
+            println("Step 4: Sending question with context to LLM...")
+            val answer = openRouterClient.askQuestion(question, context)
+
+            println("✓ Response received\n")
+            println("💬 Answer:\n$answer\n")
+
+        } else {
+            // Без RAG: просто вопрос к LLM
+            println("Sending question to LLM (without context)...")
+            val answer = openRouterClient.askQuestion(question)
+
+            println("✓ Response received\n")
+            println("💬 Answer:\n$answer\n")
+        }
+    } catch (e: Exception) {
+        println("❌ Error: ${e.message}")
+        e.printStackTrace()
+    } finally {
+        openRouterClient.close()
+    }
+}
+
 fun printUsage() {
     println("""
         Usage: java -jar OllamaTest.jar <command> [options]
 
         Commands:
-          index <rtf-file> [index-path] [chunk-size] [overlap]
+          index <rtf-file> [index-path] [max-chunk-size] [min-chunk-size]
               Process RTF file and create embeddings index
+              Текст разбивается по абзацам, а не по символам
 
               Arguments:
-                rtf-file     - Path to RTF file to process
-                index-path   - Output path for index (default: embeddings_index.json)
-                chunk-size   - Size of text chunks in characters (default: 500)
-                overlap      - Overlap between chunks in characters (default: 50)
+                rtf-file         - Path to RTF file to process
+                index-path       - Output path for index (default: embeddings_index.json)
+                max-chunk-size   - Max size for large paragraphs (default: 2000)
+                min-chunk-size   - Min size to filter small paragraphs (default: 50)
 
               Example:
-                index document.rtf my_index.json 500 50
+                index document.rtf my_index.json 2000 50
 
           search <index-path> <query> [top-k]
               Search the index with a query
@@ -226,6 +329,27 @@ fun printUsage() {
               Example:
                 search my_index.json "machine learning" 10
 
+          ask <question> [index-path] [--no-rag]
+              Ask a question to AI assistant (with or without RAG)
+
+              Arguments:
+                question     - Your question
+                index-path   - Path to the index file (default: embeddings_index.json)
+                --no-rag     - Disable RAG mode (no context retrieval)
+
+              Examples:
+                ask "Как звали степного волка?"                    # With RAG
+                ask "Что такое машинное обучение?" --no-rag       # Without RAG
+                ask "Кто главный герой?" my_index.json            # Custom index
+
+              RAG Mode (default):
+                1. Finds relevant chunks from the index
+                2. Combines them with your question
+                3. Sends to LLM for answer
+
+              Without RAG (--no-rag):
+                Sends question directly to LLM without context
+
           stats <index-path>
               Show statistics about the index
 
@@ -233,7 +357,8 @@ fun printUsage() {
                 stats my_index.json
 
         Prerequisites:
-          - Ollama must be running (http://localhost:11434)
+          - Ollama must be running (http://localhost:11434) for embeddings
           - Install embedding model: ollama pull nomic-embed-text
+          - OpenRouter API key configured in OpenRouterClient.kt
     """.trimIndent())
 }

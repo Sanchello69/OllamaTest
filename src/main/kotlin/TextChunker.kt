@@ -1,6 +1,6 @@
 class TextChunker(
-    private val chunkSize: Int = 500,
-    private val overlap: Int = 50
+    private val maxChunkSize: Int = 2000,  // Максимальный размер чанка (для очень длинных абзацев)
+    private val minChunkSize: Int = 50     // Минимальный размер чанка
 ) {
     data class Chunk(
         val text: String,
@@ -16,52 +16,99 @@ class TextChunker(
             return chunks
         }
 
-        // Clean the text
-        val cleanedText = text.trim()
-            .replace(Regex("\\s+"), " ")
+        // Минимальная очистка текста (сохраняем структуру абзацев)
+        val cleanedText = text
             .replace(Regex("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]"), "")
+            .trim()
 
-        var startPosition = 0
+        // Разбиваем на абзацы (двойной перенос строки или одинарный)
+        val paragraphs = cleanedText.split(Regex("\\n\\s*\\n|\\n"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
         var chunkIndex = 0
+        var currentPosition = 0
 
-        while (startPosition < cleanedText.length) {
-            val endPosition = minOf(startPosition + chunkSize, cleanedText.length)
+        for (paragraph in paragraphs) {
+            val paragraphLength = paragraph.length
 
-            // Try to find a good breaking point (sentence end, paragraph, etc.)
-            var actualEndPosition = endPosition
-            if (endPosition < cleanedText.length) {
-                // Look for sentence ending
-                val searchStart = maxOf(startPosition, endPosition - 100)
-                val searchText = cleanedText.substring(searchStart, endPosition)
-                val lastPeriod = searchText.lastIndexOfAny(charArrayOf('.', '!', '?', '\n'))
-
-                if (lastPeriod >= 0) {
-                    actualEndPosition = searchStart + lastPeriod + 1
-                }
+            // Если абзац слишком маленький, пропускаем
+            if (paragraphLength < minChunkSize) {
+                currentPosition += paragraphLength
+                continue
             }
 
-            val chunkText = cleanedText.substring(startPosition, actualEndPosition).trim()
-
-            if (chunkText.isNotEmpty()) {
+            // Если абзац слишком большой, разбиваем его на предложения
+            if (paragraphLength > maxChunkSize) {
+                val subChunks = splitLargeParagraph(paragraph, currentPosition)
+                subChunks.forEach { (text, start, end) ->
+                    chunks.add(
+                        Chunk(
+                            text = text,
+                            index = chunkIndex++,
+                            startPosition = start,
+                            endPosition = end
+                        )
+                    )
+                }
+                currentPosition += paragraphLength
+            } else {
+                // Абзац подходящего размера - используем как чанк
                 chunks.add(
                     Chunk(
-                        text = chunkText,
-                        index = chunkIndex,
-                        startPosition = startPosition,
-                        endPosition = actualEndPosition
+                        text = paragraph,
+                        index = chunkIndex++,
+                        startPosition = currentPosition,
+                        endPosition = currentPosition + paragraphLength
                     )
                 )
-                chunkIndex++
-            }
-
-            // Move to next chunk with overlap
-            startPosition = if (actualEndPosition < cleanedText.length) {
-                maxOf(startPosition + 1, actualEndPosition - overlap)
-            } else {
-                actualEndPosition
+                currentPosition += paragraphLength
             }
         }
 
         return chunks
+    }
+
+    private fun splitLargeParagraph(paragraph: String, basePosition: Int): List<Triple<String, Int, Int>> {
+        val result = mutableListOf<Triple<String, Int, Int>>()
+
+        // Разбиваем на предложения
+        val sentences = paragraph.split(Regex("(?<=[.!?])\\s+"))
+
+        var currentChunk = StringBuilder()
+        var chunkStart = basePosition
+        var currentPos = basePosition
+
+        for (sentence in sentences) {
+            val sentenceLength = sentence.length
+
+            // Если добавление этого предложения превысит максимум и текущий чанк не пустой
+            if (currentChunk.length + sentenceLength > maxChunkSize && currentChunk.isNotEmpty()) {
+                // Сохраняем текущий чанк
+                val chunkText = currentChunk.toString().trim()
+                if (chunkText.length >= minChunkSize) {
+                    result.add(Triple(chunkText, chunkStart, currentPos))
+                }
+
+                // Начинаем новый чанк
+                currentChunk = StringBuilder()
+                chunkStart = currentPos
+            }
+
+            // Добавляем предложение к текущему чанку
+            if (currentChunk.isNotEmpty()) {
+                currentChunk.append(" ")
+            }
+            currentChunk.append(sentence)
+            currentPos += sentenceLength
+        }
+
+        // Добавляем последний чанк
+        val chunkText = currentChunk.toString().trim()
+        if (chunkText.length >= minChunkSize) {
+            result.add(Triple(chunkText, chunkStart, currentPos))
+        }
+
+        return result
     }
 }

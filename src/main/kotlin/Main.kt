@@ -56,7 +56,7 @@ fun main(args: Array<String>) = runBlocking {
         "ask" -> {
             if (args.size < 2) {
                 println("Error: Please provide question")
-                println("Usage: ask <question> [index-path] [--no-rag]")
+                println("Usage: ask <question> [index-path] [--no-rag] [--min-score=0.7]")
                 return@runBlocking
             }
 
@@ -64,7 +64,11 @@ fun main(args: Array<String>) = runBlocking {
             val useRag = !args.contains("--no-rag")
             val indexPath = if (args.size > 2 && !args[2].startsWith("--")) args[2] else "embeddings_index.json"
 
-            askQuestion(question, indexPath, useRag)
+            // Извлекаем минимальный порог похожести из аргументов
+            val minScoreArg = args.find { it.startsWith("--min-score=") }
+            val minRelevanceScore = minScoreArg?.substringAfter("=")?.toDoubleOrNull() ?: 0.0
+
+            askQuestion(question, indexPath, useRag, minRelevanceScore)
         }
 
         else -> {
@@ -213,9 +217,13 @@ fun showStats(indexPath: String) {
     }
 }
 
-suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean) {
+suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean, minRelevanceScore: Double = 0.0) {
     println("🤖 AI Assistant ${if (useRag) "with RAG" else "without RAG"}\n")
-    println("Question: \"$question\"\n")
+    println("Question: \"$question\"")
+    if (useRag && minRelevanceScore > 0.0) {
+        println("🔍 Relevance filter: minimum score = ${"%.2f".format(minRelevanceScore)}")
+    }
+    println()
 
     val openRouterClient = OpenRouterClient()
 
@@ -255,17 +263,33 @@ suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean) {
 
             // Ищем релевантные чанки
             println("Step 3: Searching for relevant chunks...")
-            val results = index.search(queryEmbedding, 5)
+            val allResults = index.search(queryEmbedding, 5)
+
+            // Фильтруем по порогу релевантности
+            val results = if (minRelevanceScore > 0.0) {
+                allResults.filter { it.score >= minRelevanceScore }
+            } else {
+                allResults
+            }
 
             if (results.isEmpty()) {
-                println("⚠️  No relevant chunks found")
+                if (minRelevanceScore > 0.0) {
+                    println("⚠️  No chunks found with score >= ${"%.2f".format(minRelevanceScore)}")
+                    println("   Top result score was: ${"%.4f".format(allResults.firstOrNull()?.score ?: 0.0)}")
+                } else {
+                    println("⚠️  No relevant chunks found")
+                }
                 println("Falling back to non-RAG mode...\n")
                 val answer = openRouterClient.askQuestion(question)
                 println("💬 Answer:\n$answer\n")
                 return
             }
 
-            println("✓ Found ${results.size} relevant chunks\n")
+            println("✓ Found ${results.size} relevant chunks")
+            if (minRelevanceScore > 0.0 && results.size < allResults.size) {
+                println("   (filtered ${allResults.size - results.size} chunks below threshold)")
+            }
+            println()
 
             // Отображаем найденные чанки
             println("📚 Relevant chunks:")
@@ -329,23 +353,32 @@ fun printUsage() {
               Example:
                 search my_index.json "machine learning" 10
 
-          ask <question> [index-path] [--no-rag]
+          ask <question> [index-path] [--no-rag] [--min-score=THRESHOLD]
               Ask a question to AI assistant (with or without RAG)
 
               Arguments:
-                question     - Your question
-                index-path   - Path to the index file (default: embeddings_index.json)
-                --no-rag     - Disable RAG mode (no context retrieval)
+                question         - Your question
+                index-path       - Path to the index file (default: embeddings_index.json)
+                --no-rag         - Disable RAG mode (no context retrieval)
+                --min-score=X.X  - Minimum relevance score threshold (0.0-1.0, default: 0.0)
 
               Examples:
                 ask "Как звали степного волка?"                    # With RAG
                 ask "Что такое машинное обучение?" --no-rag       # Without RAG
                 ask "Кто главный герой?" my_index.json            # Custom index
+                ask "Детали сюжета?" --min-score=0.75             # High relevance only
 
               RAG Mode (default):
                 1. Finds relevant chunks from the index
-                2. Combines them with your question
-                3. Sends to LLM for answer
+                2. Filters by relevance score (if --min-score specified)
+                3. Combines them with your question
+                4. Sends to LLM for answer
+
+              Relevance Filter (--min-score):
+                - 0.0-0.5: Very loose (includes marginally relevant chunks)
+                - 0.5-0.7: Moderate filtering (recommended for general use)
+                - 0.7-0.9: Strict filtering (only highly relevant chunks)
+                - 0.9-1.0: Very strict (almost exact matches only)
 
               Without RAG (--no-rag):
                 Sends question directly to LLM without context

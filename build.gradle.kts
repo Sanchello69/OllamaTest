@@ -48,6 +48,11 @@ tasks {
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
     }
+
+    // Включаем стандартный ввод для интерактивного режима
+    named<JavaExec>("run") {
+        standardInput = System.`in`
+    }
 }
 
 kotlin {

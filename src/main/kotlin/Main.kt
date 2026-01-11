@@ -56,7 +56,7 @@ fun main(args: Array<String>) = runBlocking {
         "ask" -> {
             if (args.size < 2) {
                 println("Error: Please provide question")
-                println("Usage: ask <question> [index-path] [--no-rag] [--min-score=0.7]")
+                println("Usage: ask <question> [index-path] [--no-rag] [--min-score=0.7] [--save-history] [--history-path=path]")
                 return@runBlocking
             }
 
@@ -68,7 +68,43 @@ fun main(args: Array<String>) = runBlocking {
             val minScoreArg = args.find { it.startsWith("--min-score=") }
             val minRelevanceScore = minScoreArg?.substringAfter("=")?.toDoubleOrNull() ?: 0.0
 
-            askQuestion(question, indexPath, useRag, minRelevanceScore)
+            // Параметры истории
+            val saveHistory = args.contains("--save-history")
+            val historyPathArg = args.find { it.startsWith("--history-path=") }
+            val historyPath = historyPathArg?.substringAfter("=") ?: "conversation_history.json"
+
+            // Загрузка истории, если файл существует
+            val history = ConversationHistory()
+            if (saveHistory && File(historyPath).exists()) {
+                try {
+                    history.load(historyPath)
+                } catch (e: Exception) {
+                    println("⚠️  Could not load history: ${e.message}")
+                }
+            }
+
+            askQuestion(question, indexPath, useRag, minRelevanceScore, history, saveHistory, historyPath)
+        }
+
+        "chat" -> {
+            if (args.size < 1) {
+                println("Error: Please use chat command")
+                println("Usage: chat [index-path] [--no-rag] [--min-score=0.7] [--history-path=path]")
+                return@runBlocking
+            }
+
+            val useRag = !args.contains("--no-rag")
+            val indexPath = if (args.size > 1 && !args[1].startsWith("--")) args[1] else "embeddings_index.json"
+
+            // Извлекаем минимальный порог похожести из аргументов
+            val minScoreArg = args.find { it.startsWith("--min-score=") }
+            val minRelevanceScore = minScoreArg?.substringAfter("=")?.toDoubleOrNull() ?: 0.0
+
+            // Путь к истории
+            val historyPathArg = args.find { it.startsWith("--history-path=") }
+            val historyPath = historyPathArg?.substringAfter("=") ?: "conversation_history.json"
+
+            startChat(indexPath, useRag, minRelevanceScore, historyPath)
         }
 
         else -> {
@@ -217,15 +253,27 @@ fun showStats(indexPath: String) {
     }
 }
 
-suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean, minRelevanceScore: Double = 0.0) {
+suspend fun askQuestion(
+    question: String,
+    indexPath: String,
+    useRag: Boolean,
+    minRelevanceScore: Double = 0.0,
+    conversationHistory: ConversationHistory? = null,
+    saveHistory: Boolean = false,
+    historyPath: String = "conversation_history.json"
+) {
     println("🤖 AI Assistant ${if (useRag) "with RAG" else "without RAG"}\n")
     println("Question: \"$question\"")
     if (useRag && minRelevanceScore > 0.0) {
         println("🔍 Relevance filter: minimum score = ${"%.2f".format(minRelevanceScore)}")
     }
+    if (conversationHistory != null && conversationHistory.size() > 0) {
+        println("📜 История диалога: ${conversationHistory.size()} раундов")
+    }
     println()
 
     val openRouterClient = OpenRouterClient()
+    val history = conversationHistory ?: ConversationHistory()
 
     try {
         if (useRag) {
@@ -239,8 +287,18 @@ suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean, mi
             } catch (e: Exception) {
                 println("❌ Error loading index: ${e.message}")
                 println("Falling back to non-RAG mode...\n")
-                val answer = openRouterClient.askQuestion(question)
-                println("💬 Answer:\n$answer\n")
+                val answer = if (history.size() > 0) {
+                    openRouterClient.askQuestionWithHistory(question, history.getMessagesForLLM())
+                } else {
+                    openRouterClient.askQuestion(question)
+                }
+                println("💬 Answer:\n$answer")
+
+                // Сохраняем в историю без источников
+                history.addTurn(question, answer, emptyList(), useRag = false)
+                if (saveHistory) history.save(historyPath)
+
+                println(history.formatSources(emptyList()))
                 return
             }
 
@@ -253,8 +311,18 @@ suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean, mi
                 println("❌ Error generating query embedding: ${e.message}")
                 ollamaClient.close()
                 println("Falling back to non-RAG mode...\n")
-                val answer = openRouterClient.askQuestion(question)
-                println("💬 Answer:\n$answer\n")
+                val answer = if (history.size() > 0) {
+                    openRouterClient.askQuestionWithHistory(question, history.getMessagesForLLM())
+                } else {
+                    openRouterClient.askQuestion(question)
+                }
+                println("💬 Answer:\n$answer")
+
+                // Сохраняем в историю без источников
+                history.addTurn(question, answer, emptyList(), useRag = false)
+                if (saveHistory) history.save(historyPath)
+
+                println(history.formatSources(emptyList()))
                 return
             } finally {
                 ollamaClient.close()
@@ -280,8 +348,18 @@ suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean, mi
                     println("⚠️  No relevant chunks found")
                 }
                 println("Falling back to non-RAG mode...\n")
-                val answer = openRouterClient.askQuestion(question)
-                println("💬 Answer:\n$answer\n")
+                val answer = if (history.size() > 0) {
+                    openRouterClient.askQuestionWithHistory(question, history.getMessagesForLLM())
+                } else {
+                    openRouterClient.askQuestion(question)
+                }
+                println("💬 Answer:\n$answer")
+
+                // Сохраняем в историю без источников
+                history.addTurn(question, answer, emptyList(), useRag = false)
+                if (saveHistory) history.save(historyPath)
+
+                println(history.formatSources(emptyList()))
                 return
             }
 
@@ -301,26 +379,138 @@ suspend fun askQuestion(question: String, indexPath: String, useRag: Boolean, mi
             // Объединяем чанки в контекст
             val context = results.joinToString("\n\n---\n\n") { it.text }
 
-            // Отправляем вопрос с контекстом в LLM
+            // Отправляем вопрос с контекстом в LLM (с учетом истории)
             println("Step 4: Sending question with context to LLM...")
-            val answer = openRouterClient.askQuestion(question, context)
+            val answer = if (history.size() > 0) {
+                openRouterClient.askQuestionWithHistory(question, history.getMessagesForLLM(), context)
+            } else {
+                openRouterClient.askQuestion(question, context)
+            }
 
             println("✓ Response received\n")
-            println("💬 Answer:\n$answer\n")
+            println("💬 Answer:\n$answer")
+
+            // Сохраняем в историю с источниками
+            history.addTurn(question, answer, results, useRag = true)
+            if (saveHistory) {
+                history.save(historyPath)
+            }
+
+            // Выводим источники
+            println(history.formatSources(history.getAllTurns().last().sources))
 
         } else {
             // Без RAG: просто вопрос к LLM
             println("Sending question to LLM (without context)...")
-            val answer = openRouterClient.askQuestion(question)
+            val answer = if (history.size() > 0) {
+                openRouterClient.askQuestionWithHistory(question, history.getMessagesForLLM())
+            } else {
+                openRouterClient.askQuestion(question)
+            }
 
             println("✓ Response received\n")
-            println("💬 Answer:\n$answer\n")
+            println("💬 Answer:\n$answer")
+
+            // Сохраняем в историю без источников
+            history.addTurn(question, answer, emptyList(), useRag = false)
+            if (saveHistory) {
+                history.save(historyPath)
+            }
+
+            // Выводим источники (их нет)
+            println(history.formatSources(emptyList()))
         }
     } catch (e: Exception) {
         println("❌ Error: ${e.message}")
         e.printStackTrace()
     } finally {
         openRouterClient.close()
+    }
+}
+
+suspend fun startChat(
+    indexPath: String,
+    useRag: Boolean,
+    minRelevanceScore: Double = 0.0,
+    historyPath: String = "conversation_history.json"
+) {
+    println("💬 Интерактивный чат ${if (useRag) "с RAG" else "без RAG"}")
+    println("📝 История сохраняется в: $historyPath")
+    if (useRag && minRelevanceScore > 0.0) {
+        println("🔍 Фильтр релевантности: >= ${"%.2f".format(minRelevanceScore)}")
+    }
+    println("\nКоманды:")
+    println("  - Введите вопрос для получения ответа")
+    println("  - /history - показать историю диалога")
+    println("  - /stats - показать статистику")
+    println("  - /clear - очистить историю")
+    println("  - /exit или /quit - выход\n")
+
+    // Загрузка или создание истории
+    val history = ConversationHistory()
+    if (File(historyPath).exists()) {
+        try {
+            history.load(historyPath)
+            println("✓ Загружена история: ${history.size()} раундов\n")
+        } catch (e: Exception) {
+            println("⚠️  Не удалось загрузить историю: ${e.message}")
+            println("Создана новая история\n")
+        }
+    } else {
+        println("Создана новая история\n")
+    }
+
+    // Основной цикл чата
+    while (true) {
+        print("Вы: ")
+        val input = readLine()?.trim() ?: break
+
+        if (input.isEmpty()) continue
+
+        when (input.lowercase()) {
+            "/exit", "/quit" -> {
+                println("\n💾 Сохранение истории...")
+                history.save(historyPath)
+                println("До свидания!")
+                break
+            }
+
+            "/history" -> {
+                println("\n📜 История диалога:")
+                if (history.size() == 0) {
+                    println("  История пуста")
+                } else {
+                    history.getAllTurns().forEachIndexed { idx, turn ->
+                        println("\n--- Раунд ${idx + 1} [${turn.timestamp}] ---")
+                        println("Вы: ${turn.question}")
+                        println("AI: ${turn.answer.take(200)}${if (turn.answer.length > 200) "..." else ""}")
+                        if (turn.sources.isNotEmpty()) {
+                            println("Источников: ${turn.sources.size}")
+                        }
+                    }
+                }
+                println()
+                continue
+            }
+
+            "/stats" -> {
+                println("\n${history.getStats()}\n")
+                continue
+            }
+
+            "/clear" -> {
+                history.clear()
+                println("\n✓ История очищена\n")
+                continue
+            }
+
+            else -> {
+                // Обрабатываем вопрос
+                println()
+                askQuestion(input, indexPath, useRag, minRelevanceScore, history, saveHistory = true, historyPath)
+                println()
+            }
+        }
     }
 }
 
@@ -353,26 +543,30 @@ fun printUsage() {
               Example:
                 search my_index.json "machine learning" 10
 
-          ask <question> [index-path] [--no-rag] [--min-score=THRESHOLD]
+          ask <question> [index-path] [--no-rag] [--min-score=THRESHOLD] [--save-history] [--history-path=PATH]
               Ask a question to AI assistant (with or without RAG)
 
               Arguments:
-                question         - Your question
-                index-path       - Path to the index file (default: embeddings_index.json)
-                --no-rag         - Disable RAG mode (no context retrieval)
-                --min-score=X.X  - Minimum relevance score threshold (0.0-1.0, default: 0.0)
+                question           - Your question
+                index-path         - Path to the index file (default: embeddings_index.json)
+                --no-rag           - Disable RAG mode (no context retrieval)
+                --min-score=X.X    - Minimum relevance score threshold (0.0-1.0, default: 0.0)
+                --save-history     - Save conversation history
+                --history-path=PATH - Path to history file (default: conversation_history.json)
 
               Examples:
                 ask "Как звали степного волка?"                    # With RAG
                 ask "Что такое машинное обучение?" --no-rag       # Without RAG
                 ask "Кто главный герой?" my_index.json            # Custom index
                 ask "Детали сюжета?" --min-score=0.75             # High relevance only
+                ask "Продолжение?" --save-history                 # Save to history
 
               RAG Mode (default):
                 1. Finds relevant chunks from the index
                 2. Filters by relevance score (if --min-score specified)
                 3. Combines them with your question
                 4. Sends to LLM for answer
+                5. Shows sources used for the answer
 
               Relevance Filter (--min-score):
                 - 0.0-0.5: Very loose (includes marginally relevant chunks)
@@ -382,6 +576,33 @@ fun printUsage() {
 
               Without RAG (--no-rag):
                 Sends question directly to LLM without context
+
+          chat [index-path] [--no-rag] [--min-score=THRESHOLD] [--history-path=PATH]
+              Start interactive chat session with AI assistant
+
+              Arguments:
+                index-path         - Path to the index file (default: embeddings_index.json)
+                --no-rag           - Disable RAG mode (no context retrieval)
+                --min-score=X.X    - Minimum relevance score threshold (0.0-1.0, default: 0.0)
+                --history-path=PATH - Path to history file (default: conversation_history.json)
+
+              Interactive commands:
+                <question>   - Ask a question
+                /history     - Show conversation history
+                /stats       - Show statistics
+                /clear       - Clear history
+                /exit, /quit - Exit chat
+
+              Examples:
+                chat                              # Start chat with RAG
+                chat --no-rag                     # Start chat without RAG
+                chat my_index.json --min-score=0.7  # Custom index with filter
+
+              Features:
+                - Maintains conversation context across questions
+                - Automatically saves history after each question
+                - Shows sources for each answer (with RAG)
+                - Loads previous history on startup if exists
 
           stats <index-path>
               Show statistics about the index
